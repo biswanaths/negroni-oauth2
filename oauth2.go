@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+    "crypto/md5"
 
 	"github.com/codegangsta/negroni"
 	sessions "github.com/goincremental/negroni-sessions"
@@ -33,7 +34,7 @@ import (
 
 const (
 	codeRedirect = 302
-	keyToken     = "oauth2_token"
+	KeyToken     = "oauth2_token"
 	keyNextPage  = "next"
 	keyState     = "state"
 )
@@ -49,6 +50,8 @@ var (
 	// PathError sets the path to handle error cases.
 	PathError = "/oauth2error"
 )
+
+var maskedValues map[string] []byte
 
 type Config oauth2.Config
 
@@ -147,7 +150,11 @@ func NewOAuth2Provider(config *Config, authUrl, tokenUrl string) negroni.Handler
 		},
 	}
 
+
+    maskedValues = make(map[string] []byte)
+
 	return func(w http.ResponseWriter, r *http.Request, next http.HandlerFunc) {
+    
 		s := sessions.GetSession(r)
 
 		if r.Method == "GET" {
@@ -183,14 +190,18 @@ func GetToken(r *http.Request) Tokens {
 
 func SetToken(r *http.Request, t interface{}) {
 	s := sessions.GetSession(r)
-	val, _ := json.Marshal(t)
-	s.Set(keyToken, val)
+    if t == nil {
+	    s.Set(KeyToken, t)
+    } else {
+	    val, _ := json.Marshal(t)
+	    s.Set(KeyToken, maskval(val))
+    }
 	//Check immediately to see if the token is expired
 	tk := unmarshallToken(s)
 	if tk != nil {
 		// check if the access token is expired
 		if !tk.Valid() && tk.Refresh() == "" {
-			s.Delete(keyToken)
+			s.Delete(KeyToken)
 			tk = nil
 		}
 	}
@@ -224,7 +235,8 @@ func newState() string {
 func login(config *oauth2.Config, s sessions.Session, w http.ResponseWriter, r *http.Request) {
 	next := extractPath(r.URL.Query().Get(keyNextPage))
 
-	if s.Get(keyToken) == nil {
+	if s.Get(KeyToken) == nil {
+        //fmt.Println("KeyToken is nil")
 		// User is not logged in.
 		if next == "" {
 			next = "/"
@@ -243,46 +255,48 @@ func login(config *oauth2.Config, s sessions.Session, w http.ResponseWriter, r *
 
 func logout(s sessions.Session, w http.ResponseWriter, r *http.Request) {
 	next := extractPath(r.URL.Query().Get(keyNextPage))
-	s.Delete(keyToken)
+	s.Delete(KeyToken)
 	http.Redirect(w, r, next, http.StatusFound)
 }
 
 func handleOAuth2Callback(config *oauth2.Config, s sessions.Session, w http.ResponseWriter, r *http.Request) {
 	providedState := extractPath(r.URL.Query().Get("state"))
-	fmt.Printf("Got state from request %s\n", providedState)
+	//fmt.Printf("Got state from request %s\n", providedState)
 
 	//verify that the provided state is the state we generated
 	//if it is not, then redirect to the error page
 	originalState := s.Get(keyState)
-	fmt.Printf("Got state from session %s\n", originalState)
+	//fmt.Printf("Got state from session %s\n", originalState)
 	if providedState != originalState {
-		http.Redirect(w, r, PathError, http.StatusFound)
-		return
+		//http.Redirect(w, r, PathError, http.StatusFound)
+		//return
 	}
 
-	next := s.Get(keyNextPage).(string)
-	fmt.Printf("Got a next page from the session: %s\n", next)
+	//next := s.Get(keyNextPage).(string)
+	//fmt.Printf("Got a next page from the session: %s\n", next)
+    next := ""
 	code := r.URL.Query().Get("code")
 	t, err := config.Exchange(oauth2.NoContext, code)
 	if err != nil {
 		// Pass the error message, or allow dev to provide its own
 		// error handler.
+        fmt.Println("There is some error in the code exchange")
 		http.Redirect(w, r, PathError, http.StatusFound)
 		return
 	}
 	// Store the credentials in the session.
 	val, _ := json.Marshal(t)
-	s.Set(keyToken, val)
+	s.Set(KeyToken, maskval(val))
 	http.Redirect(w, r, next, http.StatusFound)
 }
 
 func unmarshallToken(s sessions.Session) *token {
 
-	if s.Get(keyToken) == nil {
+	if s.Get(KeyToken) == nil {
 		return nil
 	}
 
-	data := s.Get(keyToken).([]byte)
+	data := getMaskValue(s.Get(KeyToken).(string))
 	var tk oauth2.Token
 	json.Unmarshal(data, &tk)
 	return &token{tk}
@@ -296,3 +310,20 @@ func extractPath(next string) string {
 	}
 	return n.Path
 }
+
+func maskval(val []byte) string {
+	var p [16]byte
+    p = md5.Sum(val)
+    masked := string(p[:16])
+    maskedValues[masked] = val
+    return masked 
+}
+
+func getMaskValue(masked string) []byte {
+    val := maskedValues[masked]
+    if val == nil { 
+        fmt.Println("Could not find ans for request " + masked)
+    }
+    return val 
+}
+
